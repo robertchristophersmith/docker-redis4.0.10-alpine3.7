@@ -1,35 +1,10 @@
-FROM debian:stretch-slim
+FROM alpine:3.8
 
 # add our user and group first to make sure their IDs get assigned consistently, regardless of whatever dependencies get added
-RUN groupadd -r redis && useradd -r -g redis redis
+RUN addgroup -S redis && adduser -S -G redis redis
 
-# grab gosu for easy step-down from root
-# https://github.com/tianon/gosu/releases
-ENV GOSU_VERSION 1.10
-RUN set -ex; \
-	\
-	fetchDeps=" \
-		ca-certificates \
-		dirmngr \
-		gnupg \
-		wget \
-	"; \
-	apt-get update; \
-	apt-get install -y --no-install-recommends $fetchDeps; \
-	rm -rf /var/lib/apt/lists/*; \
-	\
-	dpkgArch="$(dpkg --print-architecture | awk -F- '{ print $NF }')"; \
-	wget -O /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$dpkgArch"; \
-	wget -O /usr/local/bin/gosu.asc "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$dpkgArch.asc"; \
-	export GNUPGHOME="$(mktemp -d)"; \
-	gpg --keyserver ha.pool.sks-keyservers.net --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4; \
-	gpg --batch --verify /usr/local/bin/gosu.asc /usr/local/bin/gosu; \
-	gpgconf --kill all; \
-	rm -r "$GNUPGHOME" /usr/local/bin/gosu.asc; \
-	chmod +x /usr/local/bin/gosu; \
-	gosu nobody true; \
-	\
-	apt-get purge -y --auto-remove $fetchDeps
+# grab su-exec for easy step-down from root
+RUN apk add --no-cache 'su-exec>=0.2'
 
 ENV REDIS_VERSION 4.0.10
 ENV REDIS_DOWNLOAD_URL http://download.redis.io/releases/redis-4.0.10.tar.gz
@@ -38,16 +13,14 @@ ENV REDIS_DOWNLOAD_SHA 1db67435a704f8d18aec9b9637b373c34aa233d65b6e174bdac4c1b16
 # for redis-sentinel see: http://redis.io/topics/sentinel
 RUN set -ex; \
 	\
-	buildDeps=' \
-		wget \
-		\
+	apk add --no-cache --virtual .build-deps \
+		coreutils \
 		gcc \
-		libc6-dev \
+		jemalloc-dev \
+		linux-headers \
 		make \
-	'; \
-	apt-get update; \
-	apt-get install -y $buildDeps --no-install-recommends; \
-	rm -rf /var/lib/apt/lists/*; \
+		musl-dev \
+	; \
 	\
 	wget -O redis.tar.gz "$REDIS_DOWNLOAD_URL"; \
 	echo "$REDIS_DOWNLOAD_SHA *redis.tar.gz" | sha256sum -c -; \
@@ -70,7 +43,16 @@ RUN set -ex; \
 	\
 	rm -r /usr/src/redis; \
 	\
-	apt-get purge -y --auto-remove $buildDeps
+	runDeps="$( \
+		scanelf --needed --nobanner --format '%n#p' --recursive /usr/local \
+			| tr ',' '\n' \
+			| sort -u \
+			| awk 'system("[ -e /usr/local/lib/" $1 " ]") == 0 { next } { print "so:" $1 }' \
+	)"; \
+	apk add --virtual .redis-rundeps $runDeps; \
+	apk del .build-deps; \
+	\
+	redis-server --version
 
 RUN mkdir /data && chown redis:redis /data
 VOLUME /data
